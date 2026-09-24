@@ -1,0 +1,5 @@
+[
+  {"id": "admin-1",   "role": "ADMIN",             "apiKey": "admin-key"},
+  {"id": "analyst-1", "role": "ANALYST",           "apiKey": "analyst-key"},
+  {"id": "viewer-1",  "role": "RESTRICTED_VIEWER", "apiKey": "viewer-key"}
+]

@@ -1,0 +1,10 @@
+{"type": "ip", "value": "192.168.10.10", "severity": "HIGH"}
+{"type": "IPv4", "value": "0xC0.0250.012.10", "severity": "high"}
+{"type": "ipv4-addr", "value": "10.1.2.3", "severity": "medium"}
+{"type": "Domain", "value": "Evil.Example.COM", "severity": "critical"}
+{"type": "domain-name", "value": "*.cdn-bad.net", "severity": "LOW"}
+{"type": "URL", "value": "HTTP://Bad.Example.COM:80/a?b=1", "severity": "high"}
+{"type": "md5", "value": "ABCD1234ABCD1234ABCD1234ABCD1234", "severity": "high"}
+{"type": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "severity": "low"}
+{"type": "email", "value": "Phish@Baddie.example", "severity": "medium"}
+{"type": "domain", "value": "safe.example.com", "severity": "high"}

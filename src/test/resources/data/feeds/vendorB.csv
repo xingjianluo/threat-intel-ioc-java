@@ -1,0 +1,6 @@
+# vendor B feed (restricted source)
+type,value,severity
+ip,"203.0.113.7",HIGH
+DOMAIN,restricted.internal,CRITICAL
+ip,172.16.5.4,
+md5,0123456789abcdef0123456789abcdef,medium

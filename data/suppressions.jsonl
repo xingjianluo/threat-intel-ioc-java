@@ -1,0 +1,2 @@
+{"id": "SUP-1001", "type": "domain", "pattern": "safe.example.com", "reason": "known false positive domain"}
+{"id": "SUP-1002", "type": "ipv4", "pattern": "10.0.0.0/8", "reason": "internal network allowlist"}

@@ -1,0 +1,4 @@
+type,value,severity
+ip,"10.20.30,40",high
+"ip","9.9.9.9
+domain,,low

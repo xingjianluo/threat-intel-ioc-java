@@ -1,0 +1,6 @@
+{"type": "ip", "value": "8.8.8.8", "severity": "high"}
+{"type": "ipv4", "value": "not-an-ip", "severity": "high"}
+{"type": "weirdtype", "value": "x", "severity": "high"}
+this line is not json at all
+{"type": "ipv4", "value": "", "severity": "high"}
+{"type": "ipv4", "value": "9.9.9.9", "severity": "BOGUS"}
