@@ -1,0 +1,8 @@
+type,value,severity,confidence,description
+ip,1.2.3.4,high,90,d-ip
+domain,sub.malware.example.com,low,30,subdomain ind
+domain,malware.example.com,low,30,conflicting lower confidence
+url,http://X.Example.COM/a?x=1&y=2,high,80,d-url
+domain,secret.example,high,99,restricted host
+ip,,low,1,missing
+,1.1.1.1,1,missing type

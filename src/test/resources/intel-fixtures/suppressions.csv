@@ -1,0 +1,4 @@
+id,type,value,reason
+FP-DUP,domain,malware.example.com,"analyst confirmed false positive"
+FP-DUP,domain,other.example.com,duplicate id conflict
+FP-X,ip,,missing value

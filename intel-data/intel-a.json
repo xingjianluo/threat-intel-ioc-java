@@ -1,0 +1,22 @@
+{
+  "indicators": [
+    {"type": "ip", "value": "2130706433", "severity": "HIGH", "confidence": "90", "description": "decimal-int obfuscated loopback C2"},
+    {"type": "IP", "value": "127.0.0.1", "severity": "HIGH", "confidence": "90", "description": "decimal-int obfuscated loopback C2"},
+    {"type": "cidr", "value": "10.0.0.0/8", "severity": "medium", "confidence": "70", "description": "internal range"},
+    {"type": "domain", "value": "EXAMPLE.COM", "severity": "low", "confidence": "40", "description": "Example parent domain"},
+    {"type": "domain", "value": "bad.example.com", "severity": "high", "confidence": "85", "description": "known malware host"},
+    {"type": "url", "value": "HTTP://Bad.Example.COM:80/path?z=1&a=2#top", "severity": "high", "confidence": "80", "description": "malware download url"},
+    {"type": "hash", "value": "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234", "severity": "critical", "confidence": "95", "description": "sha256 sample"},
+    {"type": "ipv6", "value": "2001:db8::1", "severity": "medium", "confidence": "60", "description": "v6 indicator"},
+
+    {"type": "banana", "value": "1.2.3.4", "severity": "high", "confidence": "50", "description": "unsupported type must be rejected"},
+    {"type": "ip", "value": "999.1.1.1", "severity": "low", "confidence": "10", "description": "malformed ip"},
+    {"type": "ip", "value": "5.5.5.5", "severity": "low", "confidence": "200", "description": "bad confidence"},
+    {"type": "domain", "value": "", "severity": "low", "confidence": "10", "description": "missing value"},
+    {"type": "hash", "value": "xyz", "severity": "low", "confidence": "10", "description": "malformed hash"}
+  ],
+  "suppressions": [
+    {"id": "WL-1", "type": "domain", "value": "safe.example.com", "reason": "verified benign host"},
+    {"id": "WL-CIDR", "type": "cidr", "value": "10.1.0.0/16", "reason": "partner network whitelist"}
+  ]
+}

@@ -1,0 +1,3 @@
+type,value,severity,confidence,description
+domain,secret.internal.example,high,99,restricted-only intel
+ip,172.16.5.5,critical,99,restricted-only intel

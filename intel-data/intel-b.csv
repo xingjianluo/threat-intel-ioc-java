@@ -1,0 +1,12 @@
+type,value,severity,confidence,description
+ip,8.8.8.8,medium,60,public dns
+domain,WWW.EXAMPLE.COM.,low,40,"Example parent domain, duplicate via csv"
+domain,bad.example.com,critical,40,"conflicting def: lower confidence different severity"
+cidr,192.168.0.0/16,medium,65,office network
+hash,abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234,critical,95,sha256 sample
+ip,2130706433,HIGH,90,"decimal-int obfuscated loopback C2"
+domain,restricted-fed.example,high,90,restricted feed indicator
+,1.1.1.1,low,10,missing type row
+ip,,low,10,missing value row
+ip,7.7.7.7,low,abc,non numeric confidence
+ip,1.2.3.4,low,50,too,few,columns,extra

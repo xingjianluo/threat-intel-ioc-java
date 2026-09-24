@@ -1,0 +1,17 @@
+{
+  "indicators": [
+    {"type": "ip", "value": "1.2.3.4", "severity": "high", "confidence": "90", "description": "d-ip"},
+    {"type": "ip", "value": "0x01020304", "severity": "high", "confidence": "90", "description": "d-ip"},
+    {"type": "cidr", "value": "10.10.0.0/16", "confidence": "70", "description": "d-cidr"},
+    {"type": "domain", "value": "Malware.Example.COM", "severity": "high", "confidence": "85", "description": "d-domain"},
+    {"type": "url", "value": "HTTP://x.example.com:80/a?y=2&x=1", "severity": "high", "confidence": "80", "description": "d-url"},
+    {"type": "hash", "value": "AA" },
+    {"type": "ip", "value": "not-an-ip"},
+    {"type": "wat", "value": "1.1.1.1"},
+    {"type": "ip", "value": "4.4.4.4", "confidence": "150"}
+  ],
+  "suppressions": [
+    {"id": "FP-1", "type": "domain", "value": "safe.Example.COM", "reason": "benign"},
+    {"id": "FP-CIDR", "type": "cidr", "value": "10.10.5.0/24", "reason": "partner"}
+  ]
+}

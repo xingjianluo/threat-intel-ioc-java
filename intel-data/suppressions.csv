@@ -1,0 +1,5 @@
+id,type,value,reason
+WH-URL,url,http://bad.example.com/path?a=2&z=1,"false positive confirmed by analyst"
+WH-DOMAIN,domain,bad.example.com,domain-wide whitelist test
+WL-1,domain,other.example.com,duplicate id with different definition must reject
+,domain,noid.example.com,missing id row
