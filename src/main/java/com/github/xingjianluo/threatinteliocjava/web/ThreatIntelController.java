@@ -3,6 +3,7 @@ package com.github.xingjianluo.threatinteliocjava.web;
 import com.github.xingjianluo.threatinteliocjava.access.AccessControlService;
 import com.github.xingjianluo.threatinteliocjava.access.Caller;
 import com.github.xingjianluo.threatinteliocjava.config.ThreatIntelProperties;
+import com.github.xingjianluo.threatinteliocjava.model.Generation;
 import com.github.xingjianluo.threatinteliocjava.model.Indicator;
 import com.github.xingjianluo.threatinteliocjava.model.Verdict;
 import com.github.xingjianluo.threatinteliocjava.refresh.RefreshOutcome;
@@ -43,8 +44,9 @@ public class ThreatIntelController {
     }
 
     /**
-     * 匹配查询。命中/抑制/清洁结论对任何调用方一致；
+     * 匹配查询。命中/抑制/覆盖/清洁结论对任何调用方一致；
      * 受限来源的命中 key 仅对有权限调用方可见，其余脱敏，但不改变 decision。
+     * generation 为空看最新一代，指定则看该代历史结果（已淘汰的代际返回 404）。
      */
     @PostMapping("/api/v1/threat-intel/match")
     public MatchResponse match(@RequestBody MatchRequest request) {
@@ -52,7 +54,8 @@ public class ThreatIntelController {
             throw new IllegalArgumentException("request body must contain non-blank 'value'");
         }
         Caller caller = accessControl.authenticate(request.apiKey());
-        Verdict verdict = service.match(request.type(), request.value(), caller);
+        Verdict verdict = service.match(request.type(), request.value(), caller,
+                request.generation());
         List<String> visibleKeys = service.visibleKeys(verdict.matchedKeys(), caller);
         return MatchResponse.from(verdict, visibleKeys);
     }
@@ -96,9 +99,47 @@ public class ThreatIntelController {
                 Set.copyOf(properties.getRestrictedSources()), effective);
     }
 
+    /**
+     * 代际历史：保留期内的全部代际（新的在前），含每个来源的采用状态。
+     * 不含指标明细，任何调用方可见。
+     */
+    @GetMapping("/api/v1/threat-intel/generations")
+    public List<GenerationView> generations() {
+        long currentId = service.currentGeneration() == null
+                ? -1L : service.currentGeneration().id();
+        return service.generations().stream()
+                .map(g -> GenerationView.from(g, currentId))
+                .toList();
+    }
+
+    /**
+     * 回滚当前生效结果到保留期内的某一代（默认仅 ANALYST/ADMIN）。
+     * 原子切换，并发查询只会看到完整的一代；已淘汰的代际返回 404。
+     */
+    @PostMapping("/api/v1/threat-intel/rollback")
+    public GenerationView rollback(@RequestParam long generation,
+                                   @RequestHeader(value = "X-API-Key", required = false) String apiKey) {
+        Caller caller = accessControl.authenticate(apiKey);
+        if (caller == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
+                    "valid X-API-Key required for rollback");
+        }
+        if (caller.role().name().equals("RESTRICTED_VIEWER")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "RESTRICTED_VIEWER may not trigger rollback");
+        }
+        log.info("rollback to generation {} requested by caller={}", generation, caller.id());
+        Generation target = service.rollback(generation);
+        return GenerationView.from(target, target.id());
+    }
+
     @GetMapping("/api/v1/threat-intel/status")
     public StatusResponse status() {
         return StatusResponse.from(service.currentSnapshot(),
-                List.copyOf(accessControl.restrictedSources()));
+                List.copyOf(accessControl.restrictedSources()),
+                service.currentGeneration(),
+                service.lastRefresh(),
+                service.generationHistoryCapacity(),
+                service.generations().size());
     }
 }

@@ -26,7 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>HASH/EMAIL：规范值精确相等（大小写不敏感经归一体现在规范值）。</li>
  * </ul>
  * 抑制规则（可声明为域名或 CIDR）命中同一等价集合时，结论为 SUPPRESSED，
- * 并在 reasons 中给出规则 id 与原因。
+ * 并在 reasons 中给出规则 id 与原因。未命中任何指标、但落在抑制/白名单规则
+ * 覆盖范围内的查询，结论为 COVERED（可解释覆盖，不算真正的命中）。
  */
 @Component
 public class MatchEngine {
@@ -64,10 +65,11 @@ public class MatchEngine {
         List<String> matchedKeys = hits.stream().map(Indicator::key).distinct().toList();
         boolean matched = !hits.isEmpty();
         boolean suppressed = false;
+        boolean covered = false;
 
+        List<SuppressionRule> covering = findCoveringSuppressions(
+                snapshot.suppressions(), type, normalized, reasons);
         if (matched) {
-            List<SuppressionRule> covering = findCoveringSuppressions(
-                    snapshot.suppressions(), type, normalized, reasons);
             if (!covering.isEmpty()) {
                 suppressed = true;
                 for (SuppressionRule rule : covering) {
@@ -80,12 +82,23 @@ public class MatchEngine {
                         + " severity=" + ind.severity()
                         + (ind.conflictNote() == null ? "" : " note=" + ind.conflictNote()));
             }
+        } else if (!covering.isEmpty()) {
+            // 被规则圈住但本身没有命中：可解释覆盖，不是真正的命中
+            covered = true;
+            reasons.add("no indicator matched");
+            for (SuppressionRule rule : covering) {
+                reasons.add("covered by rule " + rule.id()
+                        + " (pattern='" + rule.pattern() + "', reason=" + rule.reason()
+                        + ") without any indicator hit");
+            }
         } else {
             reasons.add("no indicator matched");
         }
 
-        String decision = suppressed ? "SUPPRESSED" : matched ? "HIT" : "CLEAN";
-        Verdict verdict = new Verdict(input, normalized, matched, suppressed,
+        String decision = suppressed ? "SUPPRESSED"
+                : matched ? "HIT"
+                : covered ? "COVERED" : "CLEAN";
+        Verdict verdict = new Verdict(input, normalized, matched, suppressed, covered,
                 decision, List.copyOf(reasons), matchedKeys);
         log.info("match verdict: input='{}' normalized='{}' decision={} matchedKeys={} reasons={}",
                 input, normalized, decision, matchedKeys, verdict.reasons());

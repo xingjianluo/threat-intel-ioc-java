@@ -2,6 +2,7 @@ package com.github.xingjianluo.threatinteliocjava.web;
 
 import com.github.xingjianluo.threatinteliocjava.access.AccessDeniedException;
 import com.github.xingjianluo.threatinteliocjava.normalize.NormalizationException;
+import com.github.xingjianluo.threatinteliocjava.refresh.GenerationNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -44,5 +45,15 @@ public class ApiExceptionHandler {
         return ResponseEntity.badRequest().body(Map.of(
                 "error", "BAD_REQUEST",
                 "message", String.valueOf(ex.getMessage())));
+    }
+
+    @ExceptionHandler(GenerationNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleGenerationNotFound(
+            GenerationNotFoundException ex) {
+        log.warn("404 generation not found: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                "error", "GENERATION_NOT_FOUND",
+                "generation", ex.generationId(),
+                "message", ex.getMessage()));
     }
 }
