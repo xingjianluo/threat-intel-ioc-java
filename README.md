@@ -11,7 +11,7 @@
 ## 1. 快速开始
 
 ```bash
-# 一键运行全部测试（39 个，离线可跑）
+# 一键运行全部测试（56 个，离线可跑）
 mvn -o test
 
 # 启动服务（启动时自动加载 data/ 目录完成首装）
@@ -32,8 +32,20 @@ curl -s -X POST localhost:8080/api/v1/threat-intel/match \
 # 手动刷新（ANALYST/ADMIN）
 curl -s -X POST localhost:8080/api/v1/threat-intel/refresh -H 'X-API-Key: analyst-key'
 
-# 快照状态
+# 快照状态（含当前代来源健康）
 curl -s localhost:8080/api/v1/threat-intel/status
+
+# 代际列表（当前生效代 + 保留的历史代，含每代来源健康）
+curl -s localhost:8080/api/v1/threat-intel/generations
+
+# 按代际匹配（generation 可省略，省略即当前生效代）
+curl -s -X POST localhost:8080/api/v1/threat-intel/match \
+  -H 'Content-Type: application/json' \
+  -d '{"value":"evil.example.com","generation":1}'
+
+# 回滚到历史代（ANALYST/ADMIN）
+curl -s -X POST 'localhost:8080/api/v1/threat-intel/rollback?version=1' \
+  -H 'X-API-Key: analyst-key'
 
 # 指标明细（受限来源 viewer-key 返回 403，analyst-key 返回 200）
 curl -s 'localhost:8080/api/v1/threat-intel/indicators?key=DOMAIN:restricted.internal' \
@@ -162,6 +174,39 @@ domain,restricted.internal,CRITICAL
   结论为 `REJECTED_PRESERVED`（首装无旧快照时为 `REJECTED_NO_PREVIOUS_STATE`，
   进入空快照）。
 - **ACCEPT_PARTIAL**：坏条目逐条记录原因，好条目照常生效。
+- **来源级读取失败是硬边界（两种策略一致）**：某个来源文件不可读或文件级解析失败时，
+  无论哪种策略本次刷新都不生效——**读取异常绝不会被当成一份合法的空情报**。
+  匹配继续按上一份完整可用的代际判定，刷新结论明确为失败并逐来源给出原因。
+
+### 5.1 来源健康：每代可追溯
+
+每次刷新（无论是否生效）都形成一份**逐来源健康留痕** `SourceHealth`，
+随 `RefreshOutcome.sourceHealth` 返回；生效代的留痕同时保存在快照上，
+可从 `/status` 与 `/generations` 查看：
+
+| 状态                 | 含义                                                     |
+|----------------------|----------------------------------------------------------|
+| `ADOPTED`            | 来源正常读取并采用                                       |
+| `SKIPPED_EMPTY`      | 来源正常读取但**合法地**不含任何条目（合法空情报）       |
+| `SKIPPED_UNREADABLE` | 来源这次**没能正常读到**（IO/文件级解析失败），不是空情报 |
+
+### 5.2 刷新代际、按代查询与回滚
+
+- **每一次成功刷新形成一代**（版本号单调递增），可追溯该代用了哪些来源、
+  每个来源的采用状态。
+- **按代查询**：匹配请求可带 `generation` 指定历史代；缺省看当前生效代。
+  指定当前代与缺省结果一致。
+- **回滚**：`POST /rollback?version=N` 把当前生效结果切回某个历史代；
+  被替换的当前代重新进入历史（回滚本身也是可追溯的代际切换）。
+  回滚到当前代返回 `ALREADY_CURRENT`（无操作）。
+- **容量上限**：历史代际默认保留最近 **5** 代（`threatintel.history-capacity` 可配）。
+  容量超限从最旧端淘汰；**淘汰只影响历史查询/回滚，绝不影响当前生效代**。
+  已被淘汰的代不可查询、不可回滚：返回 `GENERATION_EVICTED`（与从未存在的
+  `GENERATION_NOT_FOUND` 可区分）。初始空快照（v0）不占历史位。
+- **并发一致性**：当前代 + 历史代 + 淘汰水位是一个**不可变整体视图**
+  （`volatile` 引用，写者持锁整体替换）。回滚/刷新与查询并发时，
+  任一查询只会看到**完整的一代**，绝不出现半新半旧；回滚与刷新共用同一把
+  `tryLock`，并发回滚/刷新的第二调用方立即得到 `ALREADY_RUNNING`。
 - **相同内容重复刷新**：对目录内文件字节做 SHA-256 哈希（文件名排序后逐个更新），
   哈希相同且已装载 → 返回 `APPLIED_UNCHANGED`，**版本不递增、无漂移、无重复**。
 - 版本号单调递增；`firstSeen` 在跨刷新间保留。
@@ -173,8 +218,14 @@ REJECTED_PRESERVED / REJECTED_NO_PREVIOUS_STATE`。
 
 ## 6. 抑制/白名单优先级与可解释判定
 
-- 最终结论 `decision ∈ HIT / SUPPRESSED / CLEAN`。
+- 最终结论 `decision ∈ HIT / SUPPRESSED / COVERED / CLEAN`。
 - **抑制优先于命中**：先算指标命中；只要存在覆盖该等价集合的规则，结论即 `SUPPRESSED`。
+- **覆盖解释（COVERED）**：被抑制/白名单规则圈住、但本身**没有命中任何指标**的查询，
+  结论为 `COVERED`——它明确体现"在规则覆盖范围内"，但**不是真正的命中**
+  （`matched=false`、`matchedKeys` 为空）。响应同时给出 `covered` 与
+  `coveringRuleIds`，`reasons` 中逐条列出覆盖规则及"无指标命中"的说明。
+  覆盖判定与命中判定相互独立，且**不因调用方权限不足而改变**。
+  未命中且未被覆盖的查询仍为 `CLEAN`（`covered=false`）。
 - 规则覆盖语义与指标一致：域名规则覆盖其**子域**；IPv4 规则支持精确与 **CIDR 网段包含**；
   URL 查询按主机做跨类型覆盖判定。
 - 响应 `reasons`（并同步打印日志）按顺序给出：
@@ -208,13 +259,16 @@ suppressed by rule SUP-1002 (pattern='10.0.0.0/8', reason=internal network allow
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/threat-intel/match` | body `{type?, value, apiKey?}`，返回判定 + 脱敏后可见 key |
+| POST | `/api/v1/threat-intel/match` | body `{type?, value, apiKey?, generation?}`，返回判定 + 覆盖解释 + 脱敏后可见 key；`generation` 指定历史代 |
 | GET  | `/api/v1/threat-intel/indicators?key=TYPE:value` | 明细，`X-API-Key` 鉴权，受限来源 403 |
-| POST | `/api/v1/threat-intel/refresh?policy=FAIL_CLOSED|ACCEPT_PARTIAL` | 手动刷新（ANALYST/ADMIN） |
-| GET  | `/api/v1/threat-intel/status` | 版本、哈希、指标/抑制数、来源计数、受限来源 |
+| POST | `/api/v1/threat-intel/refresh?policy=FAIL_CLOSED|ACCEPT_PARTIAL` | 手动刷新（ANALYST/ADMIN），结论含逐来源健康 |
+| POST | `/api/v1/threat-intel/rollback?version=N` | 回滚当前生效结果到历史代（ANALYST/ADMIN） |
+| GET  | `/api/v1/threat-intel/generations` | 代际列表：当前生效代 + 历史代，含每代来源健康 |
+| GET  | `/api/v1/threat-intel/status` | 版本、哈希、指标/抑制数、来源计数、受限来源、当前代来源健康 |
 
 错误响应可区分：`400 INVALID_INDICATOR`（带 `reasonCode`）、`401 UNAUTHORIZED`、
-`403 ACCESS_DENIED`。
+`403 ACCESS_DENIED`、`404 GENERATION_UNAVAILABLE`（`reason` 为
+`GENERATION_EVICTED` / `GENERATION_NOT_FOUND`）。
 
 ---
 
@@ -226,6 +280,7 @@ threatintel.suppression-file=data/suppressions.jsonl
 threatintel.caller-file=data/callers.json
 threatintel.restricted-sources[0]=vendorB
 threatintel.refresh-policy=FAIL_CLOSED
+threatintel.history-capacity=5
 ```
 
 情报目录不存在不阻断启动（进入空快照并告警）。测试资源目录
@@ -248,6 +303,10 @@ mvn -o test
 | `SuppressionAndAccessTest` | 抑制优先、网段/子域覆盖、403 与 200、**拒绝访问不改变命中**、匿名判定一致+key 脱敏 |
 | `MatchExplainabilityTest` | Logback 捕获断言日志含输入/归一值/结论/规则 id，拒绝日志含可区分原因码 |
 | `ThreatIntelApiIntegrationTest` | `@SpringBootTest + MockMvc` 端到端：HIT/SUPPRESSED、400/401/403、脱敏、刷新角色、状态 |
+| `SourceHealthRefreshTest` | 每代来源健康留痕；合法空来源 vs 读取失败可区分；来源不可读时两种策略都整批不生效、匹配按上一代判定 |
+| `GenerationHistoryRollbackTest` | 按代查询、回滚切换与可追溯、容量淘汰（`GENERATION_EVICTED`/`GENERATION_NOT_FOUND`）、回滚与查询并发只见完整代 |
+| `CoverageExplanationTest` | 被规则圈住但未命中 -> `COVERED`（非命中）；命中且抑制 -> `SUPPRESSED`；权限不足不改变覆盖/命中判定 |
+| `GenerationApiIntegrationTest` | 端到端：`/generations` 代际与健康、按代匹配、回滚角色与结论、`COVERED` 响应、404 可区分 |
 
 结果稳定可复现：文件按名排序、规范值与快照确定、并发结论可枚举；
 判定依据在响应 `reasons` 与 INFO/WARN 日志中均可追溯。
@@ -261,7 +320,7 @@ model/        统一模型：Indicator / ThreatSnapshot / Verdict / SuppressionR
 normalize/    Normalizer（类型与值归一、IPv4 手写解析、CIDR、类型推断）
 ingest/       FeedParser 接口 + JsonlFeedParser / CsvFeedParser（逐行拒绝）
 source/       LocalFeedRepository（本地目录扫描、解析分发、内容哈希）
-refresh/      ThreatIntelService（锁与不可变快照、冲突收敛、刷新策略）
+refresh/      ThreatIntelService（锁与不可变代际注册表、冲突收敛、刷新策略、回滚）
 match/        MatchEngine（等价匹配、跨类型匹配、抑制覆盖、快照索引）
 access/       CallerDirectory / AccessControlService / AccessDeniedException
 web/          REST 控制器、DTO、全局异常处理

@@ -4,7 +4,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 一份不可变的情报快照。匹配线程始终读取完整快照，从不会看到部分加载数据。
+ * 一份不可变的情报快照（即一代刷新结果）。匹配线程始终读取完整快照，
+ * 从不会看到部分加载数据。
  *
  * @param version        单调递增版本号（内容未变化的重复刷新不递增）
  * @param loadedAt       加载时间
@@ -12,6 +13,7 @@ import java.util.Map;
  * @param indicators     去重并按 key 排序后的指标
  * @param suppressions   抑制/白名单规则
  * @param sourceCounts   来源 -> 指标条数（用于计数核对）
+ * @param sourceHealth   本代每个来源的采用状态（正常采用/合法为空/读取失败，可追溯）
  */
 public record ThreatSnapshot(
         long version,
@@ -19,10 +21,11 @@ public record ThreatSnapshot(
         String contentHash,
         List<Indicator> indicators,
         List<SuppressionRule> suppressions,
-        Map<String, Integer> sourceCounts) {
+        Map<String, Integer> sourceCounts,
+        List<SourceHealth> sourceHealth) {
 
     /** 初始空快照。 */
     public static ThreatSnapshot empty() {
-        return new ThreatSnapshot(0L, 0L, "-", List.of(), List.of(), Map.of());
+        return new ThreatSnapshot(0L, 0L, "-", List.of(), List.of(), Map.of(), List.of());
     }
 }

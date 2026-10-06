@@ -7,6 +7,7 @@ import com.github.xingjianluo.threatinteliocjava.model.Indicator;
 import com.github.xingjianluo.threatinteliocjava.model.Verdict;
 import com.github.xingjianluo.threatinteliocjava.refresh.RefreshOutcome;
 import com.github.xingjianluo.threatinteliocjava.refresh.RefreshPolicy;
+import com.github.xingjianluo.threatinteliocjava.refresh.RollbackOutcome;
 import com.github.xingjianluo.threatinteliocjava.refresh.ThreatIntelService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,8 +44,9 @@ public class ThreatIntelController {
     }
 
     /**
-     * 匹配查询。命中/抑制/清洁结论对任何调用方一致；
+     * 匹配查询。命中/抑制/覆盖/清洁结论对任何调用方一致；
      * 受限来源的命中 key 仅对有权限调用方可见，其余脱敏，但不改变 decision。
+     * generation 可空：为空看当前生效代，指定版本看该代历史结果。
      */
     @PostMapping("/api/v1/threat-intel/match")
     public MatchResponse match(@RequestBody MatchRequest request) {
@@ -52,7 +54,8 @@ public class ThreatIntelController {
             throw new IllegalArgumentException("request body must contain non-blank 'value'");
         }
         Caller caller = accessControl.authenticate(request.apiKey());
-        Verdict verdict = service.match(request.type(), request.value(), caller);
+        Verdict verdict = service.match(request.type(), request.value(), caller,
+                request.generation());
         List<String> visibleKeys = service.visibleKeys(verdict.matchedKeys(), caller);
         return MatchResponse.from(verdict, visibleKeys);
     }
@@ -100,5 +103,37 @@ public class ThreatIntelController {
     public StatusResponse status() {
         return StatusResponse.from(service.currentSnapshot(),
                 List.copyOf(accessControl.restrictedSources()));
+    }
+
+    /**
+     * 代际列表：当前生效代 + 保留的历史代（含每代来源健康留痕）。
+     * 不含指标明细，对所有调用方可见。
+     */
+    @GetMapping("/api/v1/threat-intel/generations")
+    public List<GenerationView> generations() {
+        long activeVersion = service.currentSnapshot().version();
+        return service.generations().stream()
+                .map(s -> GenerationView.from(s, s.version() == activeVersion))
+                .toList();
+    }
+
+    /**
+     * 回滚当前生效结果到指定历史代际（默认仅 ANALYST/ADMIN）。
+     * 并发查询只会看到完整的一代；已被淘汰的代际返回 GENERATION_EVICTED。
+     */
+    @PostMapping("/api/v1/threat-intel/rollback")
+    public RollbackOutcome rollback(@RequestParam long version,
+                                    @RequestHeader(value = "X-API-Key", required = false) String apiKey) {
+        Caller caller = accessControl.authenticate(apiKey);
+        if (caller == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
+                    "valid X-API-Key required for rollback");
+        }
+        if (caller.role().name().equals("RESTRICTED_VIEWER")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "RESTRICTED_VIEWER may not trigger rollback");
+        }
+        log.info("rollback requested by caller={} targetVersion={}", caller.id(), version);
+        return service.rollback(version);
     }
 }

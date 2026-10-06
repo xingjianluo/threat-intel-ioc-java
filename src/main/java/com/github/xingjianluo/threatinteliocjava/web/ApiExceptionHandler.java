@@ -38,6 +38,17 @@ public class ApiExceptionHandler {
                 "message", ex.getMessage()));
     }
 
+    @ExceptionHandler(com.github.xingjianluo.threatinteliocjava.refresh.GenerationNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleGenerationNotFound(
+            com.github.xingjianluo.threatinteliocjava.refresh.GenerationNotFoundException ex) {
+        log.warn("404 generation unavailable: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                "error", "GENERATION_UNAVAILABLE",
+                "reason", ex.reason(),
+                "generation", ex.generation(),
+                "message", ex.getMessage()));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleIllegal(IllegalArgumentException ex) {
         log.warn("400 illegal argument: {}", ex.getMessage());

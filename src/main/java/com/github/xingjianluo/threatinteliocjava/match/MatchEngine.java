@@ -63,13 +63,17 @@ public class MatchEngine {
 
         List<String> matchedKeys = hits.stream().map(Indicator::key).distinct().toList();
         boolean matched = !hits.isEmpty();
-        boolean suppressed = false;
+
+        // 覆盖判定与命中判定相互独立：无论是否命中，都计算圈住该查询的抑制/白名单规则，
+        // 使"被规则覆盖但本身未命中"的查询同样可解释。权限不影响覆盖/命中判定。
+        List<SuppressionRule> covering = findCoveringSuppressions(
+                snapshot.suppressions(), type, normalized, reasons);
+        boolean covered = !covering.isEmpty();
+        List<String> coveringRuleIds = covering.stream().map(SuppressionRule::id).toList();
+        boolean suppressed = matched && covered;
 
         if (matched) {
-            List<SuppressionRule> covering = findCoveringSuppressions(
-                    snapshot.suppressions(), type, normalized, reasons);
-            if (!covering.isEmpty()) {
-                suppressed = true;
+            if (suppressed) {
                 for (SuppressionRule rule : covering) {
                     reasons.add("suppressed by rule " + rule.id()
                             + " (pattern='" + rule.pattern() + "', reason=" + rule.reason() + ")");
@@ -80,13 +84,22 @@ public class MatchEngine {
                         + " severity=" + ind.severity()
                         + (ind.conflictNote() == null ? "" : " note=" + ind.conflictNote()));
             }
+        } else if (covered) {
+            for (SuppressionRule rule : covering) {
+                reasons.add("covered by rule " + rule.id()
+                        + " (pattern='" + rule.pattern() + "', reason=" + rule.reason()
+                        + ") but no indicator matched");
+            }
+            reasons.add("no indicator matched");
         } else {
             reasons.add("no indicator matched");
         }
 
-        String decision = suppressed ? "SUPPRESSED" : matched ? "HIT" : "CLEAN";
+        String decision = suppressed ? "SUPPRESSED"
+                : matched ? "HIT"
+                : covered ? "COVERED" : "CLEAN";
         Verdict verdict = new Verdict(input, normalized, matched, suppressed,
-                decision, List.copyOf(reasons), matchedKeys);
+                decision, List.copyOf(reasons), matchedKeys, covered, coveringRuleIds);
         log.info("match verdict: input='{}' normalized='{}' decision={} matchedKeys={} reasons={}",
                 input, normalized, decision, matchedKeys, verdict.reasons());
         return verdict;

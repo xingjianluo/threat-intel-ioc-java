@@ -59,22 +59,61 @@ public class ThreatIntelService {
     private final Normalizer normalizer;
     private final MatchEngine matchEngine;
     private final AccessControlService accessControl;
+    private final int historyCapacity;
 
     private final ReentrantLock refreshLock = new ReentrantLock();
-    private volatile ThreatSnapshot snapshot = ThreatSnapshot.empty();
+    /**
+     * 当前生效代 + 历史代 + 淘汰水位的不可变整体视图。
+     * 写者（刷新/回滚）持锁整体替换该引用；读者一次读取即得到一致视图，
+     * 因此并发回滚与查询只会看到完整的一代，绝不出现半新半旧。
+     */
+    private volatile GenerationRegistry registry = GenerationRegistry.initial();
 
+    /** 代际注册表（不可变）：当前生效代、历史代（旧 -> 新）、已淘汰最高版本。 */
+    private record GenerationRegistry(
+            ThreatSnapshot current,
+            List<ThreatSnapshot> history,
+            long maxEvictedVersion) {
+
+        static GenerationRegistry initial() {
+            return new GenerationRegistry(ThreatSnapshot.empty(), List.of(), 0L);
+        }
+    }
+
+    /**
+     * Spring 装配构造器：历史容量来自配置 {@code threatintel.history-capacity}。
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    public ThreatIntelService(LocalFeedRepository repository,
+                              Normalizer normalizer,
+                              MatchEngine matchEngine,
+                              AccessControlService accessControl,
+                              com.github.xingjianluo.threatinteliocjava.config.ThreatIntelProperties properties) {
+        this(repository, normalizer, matchEngine, accessControl, properties.getHistoryCapacity());
+    }
+
+    /** 测试/手工装配构造器：默认保留最近 5 代历史。 */
     public ThreatIntelService(LocalFeedRepository repository,
                               Normalizer normalizer,
                               MatchEngine matchEngine,
                               AccessControlService accessControl) {
+        this(repository, normalizer, matchEngine, accessControl, 5);
+    }
+
+    public ThreatIntelService(LocalFeedRepository repository,
+                              Normalizer normalizer,
+                              MatchEngine matchEngine,
+                              AccessControlService accessControl,
+                              int historyCapacity) {
         this.repository = repository;
         this.normalizer = normalizer;
         this.matchEngine = matchEngine;
         this.accessControl = accessControl;
+        this.historyCapacity = Math.max(0, historyCapacity);
     }
 
     public ThreatSnapshot currentSnapshot() {
-        return snapshot;
+        return registry.current();
     }
 
     /**
@@ -100,9 +139,10 @@ public class ThreatIntelService {
     }
 
     private RefreshOutcome alreadyRunning() {
+        ThreatSnapshot current = registry.current();
         log.warn("refresh skipped: another refresh is already running (snapshot v{} retained)",
-                snapshot.version());
-        return new RefreshOutcome("ALREADY_RUNNING", snapshot.version(),
+                current.version());
+        return new RefreshOutcome("ALREADY_RUNNING", current.version(),
                 zeroReport(), List.of(),
                 "refresh already in progress; existing snapshot retained");
     }
@@ -111,7 +151,7 @@ public class ThreatIntelService {
                                      String suppressionFile,
                                      Set<String> configuredRestrictedSources,
                                      RefreshPolicy policy) {
-        ThreatSnapshot previous = this.snapshot;
+        ThreatSnapshot previous = registry.current();
         long start = System.currentTimeMillis();
         log.info("refresh started: directory={} policy={} fromVersion={}",
                 directory, policy, previous.version());
@@ -143,6 +183,28 @@ public class ThreatIntelService {
                     new RejectedEntry(null, directory, RejectionCode.PARSE_IO_ERROR,
                             "load failure: " + e.getMessage()),
                     "refresh failed while reading files; existing snapshot retained");
+        }
+
+        // 2a) 来源健康留痕：正常采用 / 合法为空 / 读取失败，三者可区分
+        List<com.github.xingjianluo.threatinteliocjava.model.SourceHealth> sourceHealth =
+                deriveSourceHealth(loaded);
+
+        // 2b) 来源级读取失败（文件不可读/文件级解析错误）绝不能被当成合法空情报：
+        //     无论 FAIL_CLOSED 还是 ACCEPT_PARTIAL，本次刷新都不生效，
+        //     匹配继续按上一份完整可用的代际判定。
+        if (!loaded.fileFailures().isEmpty()) {
+            List<RejectedEntry> sourceFailures = new ArrayList<>(loaded.fileFailures());
+            sourceFailures.forEach(f -> log.error(
+                    "source unreadable: source={} file={} code={} detail={}",
+                    f.source(), f.rawLine(), f.code(), f.detail()));
+            String outcome = previous.version() == 0L
+                    ? "REJECTED_NO_PREVIOUS_STATE" : "REJECTED_PRESERVED";
+            String message = "refresh failed: " + sourceFailures.size()
+                    + " source(s) unreadable (an unreadable source is never treated as"
+                    + " legitimately empty); snapshot v" + previous.version() + " retained";
+            log.error("{} (policy={})", message, policy);
+            return new RefreshOutcome(outcome, previous.version(), zeroReport(),
+                    List.copyOf(sourceFailures), message, sourceHealth);
         }
 
         // 3) 归一化每条记录；逐行拒绝（含解析阶段已发现的坏行）
@@ -224,7 +286,7 @@ public class ThreatIntelService {
             String outcome = previous.version() == 0L
                     ? "REJECTED_NO_PREVIOUS_STATE" : "REJECTED_PRESERVED";
             return new RefreshOutcome(outcome, previous.version(), report,
-                    List.copyOf(rejected), why);
+                    List.copyOf(rejected), why, sourceHealth);
         }
         if (hasFailure) {
             log.warn("ACCEPT_PARTIAL: applying {} indicators, {} rejected items recorded",
@@ -246,8 +308,9 @@ public class ThreatIntelService {
             merged.put(key, new Indicator(nr.type(), nr.value(), nr.display(),
                     Set.copyOf(sources), nr.severity(), firstSeen, now, nr.conflictNote()));
         }
-        ThreatSnapshot newSnapshot = buildSnapshot(previous.version(), hash, merged, suppressions);
-        this.snapshot = newSnapshot;
+        ThreatSnapshot newSnapshot = buildSnapshot(previous.version(), hash, merged,
+                suppressions, sourceHealth);
+        this.registry = advance(registry, newSnapshot);
         accessControl.updateRestrictedSources(configuredRestrictedSources);
         log.info("refresh applied: version={} indicators={} suppressions={} rejected={} in {}ms",
                 newSnapshot.version(), newSnapshot.indicators().size(),
@@ -255,11 +318,68 @@ public class ThreatIntelService {
         return new RefreshOutcome(hasFailure ? "APPLIED_PARTIAL" : "APPLIED",
                 newSnapshot.version(), report, List.copyOf(rejected),
                 hasFailure ? "applied with " + rejected.size() + " rejected items recorded"
-                        : "refresh applied cleanly");
+                        : "refresh applied cleanly",
+                sourceHealth);
     }
 
-    private List<SuppressionRule> loadSuppressions(String file, List<RejectedEntry> failures) {
-        String content;
+    /**
+     * 从目录装载结果推导每个来源的健康状态（按来源名排序，确定可复现）。
+     * 文件级失败 -> SKIPPED_UNREADABLE；解析成功但无任何条目 -> SKIPPED_EMPTY；
+     * 其余 -> ADOPTED。
+     */
+    private List<com.github.xingjianluo.threatinteliocjava.model.SourceHealth> deriveSourceHealth(
+            LocalFeedRepository.LoadedDirectory loaded) {
+        Map<String, com.github.xingjianluo.threatinteliocjava.model.SourceHealth> bySource =
+                new TreeMap<>();
+        for (LocalFeedRepository.FeedBatch batch : loaded.batches()) {
+            boolean empty = batch.batch().entries().isEmpty();
+            bySource.put(batch.source(), empty
+                    ? new com.github.xingjianluo.threatinteliocjava.model.SourceHealth(
+                            batch.source(),
+                            com.github.xingjianluo.threatinteliocjava.model.SourceStatus.SKIPPED_EMPTY,
+                            "source parsed successfully but contained no entries"
+                                    + " (legitimately empty)")
+                    : new com.github.xingjianluo.threatinteliocjava.model.SourceHealth(
+                            batch.source(),
+                            com.github.xingjianluo.threatinteliocjava.model.SourceStatus.ADOPTED,
+                            "source read and adopted"));
+        }
+        for (RejectedEntry failure : loaded.fileFailures()) {
+            String source = failure.source() == null ? "<unknown>" : failure.source();
+            bySource.put(source, new com.github.xingjianluo.threatinteliocjava.model.SourceHealth(
+                    source,
+                    com.github.xingjianluo.threatinteliocjava.model.SourceStatus.SKIPPED_UNREADABLE,
+                    failure.code() + ": " + failure.detail()));
+        }
+        return List.copyOf(bySource.values());
+    }
+
+    /**
+     * 生成"切换到 next 为当前生效代"的新注册表（刷新锁内调用）：
+     * 被替换的当前代压入历史（v0 空快照不占位），容量超限时从最旧端淘汰。
+     * 淘汰只影响历史查询/回滚，绝不影响当前生效代。
+     */
+    private GenerationRegistry advance(GenerationRegistry reg, ThreatSnapshot next) {
+        List<ThreatSnapshot> hist = new ArrayList<>(reg.history());
+        if (reg.current().version() > 0L) {
+            hist.add(reg.current());
+        }
+        long maxEvicted = evictOverflow(hist, reg.maxEvictedVersion());
+        return new GenerationRegistry(next, List.copyOf(hist), maxEvicted);
+    }
+
+    /** 容量超限从最旧端淘汰，返回新的淘汰水位。 */
+    private long evictOverflow(List<ThreatSnapshot> hist, long maxEvicted) {
+        while (hist.size() > historyCapacity) {
+            ThreatSnapshot evicted = hist.remove(0);
+            maxEvicted = Math.max(maxEvicted, evicted.version());
+            log.info("generation v{} evicted from history (capacity={})",
+                    evicted.version(), historyCapacity);
+        }
+        return maxEvicted;
+    }
+
+    private List<SuppressionRule> loadSuppressions(String file, List<RejectedEntry> failures) {        String content;
         try {
             content = repository.readTextFile(file);
         } catch (RuntimeException e) {
@@ -316,11 +436,102 @@ public class ThreatIntelService {
 
     /** 匹配查询：始终基于某一份完整快照，访问控制不影响命中结论。 */
     public Verdict match(String typeHint, String input, Caller caller) {
-        ThreatSnapshot read = this.snapshot;
+        return match(typeHint, input, caller, null);
+    }
+
+    /**
+     * 按代际匹配查询：generation 为 null 时看当前生效代；指定版本时看该代历史结果。
+     * 无论看哪一代，判定都基于一份完整不可变快照，绝不出现半新半旧。
+     */
+    public Verdict match(String typeHint, String input, Caller caller, Long generation) {
+        ThreatSnapshot read = resolveGeneration(generation);
         log.info("match request: caller={} typeHint='{}' input='{}' onSnapshotV{}",
                 caller == null ? "<anonymous>" : caller.id() + "(" + caller.role() + ")",
                 typeHint, input, read.version());
         return matchEngine.match(read, typeHint, input);
+    }
+
+    /** 解析目标代际：null 或当前版本 -> 当前生效代；否则查历史，缺失抛可区分异常。 */
+    private ThreatSnapshot resolveGeneration(Long generation) {
+        GenerationRegistry reg = this.registry; // 一次读取，视图一致
+        ThreatSnapshot current = reg.current();
+        if (generation == null || generation == current.version()) {
+            return current;
+        }
+        for (ThreatSnapshot past : reg.history()) {
+            if (past.version() == generation) {
+                return past;
+            }
+        }
+        String reason = generation <= reg.maxEvictedVersion() && generation > 0
+                ? "GENERATION_EVICTED" : "GENERATION_NOT_FOUND";
+        throw new GenerationNotFoundException(generation, reason,
+                "generation v" + generation + " is not available (" + reason
+                        + "); current=v" + current.version());
+    }
+
+    /**
+     * 把当前生效结果回滚到某个历史代际。
+     *
+     * <p>并发语义：与刷新共用同一把 {@link ReentrantLock}，回滚期间到达的刷新/回滚
+     * 立即得到 {@code ALREADY_RUNNING}；查询不取锁，要么看到回滚前的完整代，
+     * 要么看到回滚后的完整代，绝不出现半新半旧。被替换的当前代会重新进入历史
+     * （受容量约束），因此回滚本身也是一次可追溯的代际切换。
+     * 已被容量淘汰的代际返回 {@code GENERATION_EVICTED}，不可回滚。
+     */
+    public RollbackOutcome rollback(long generation) {
+        if (!refreshLock.tryLock()) {
+            return new RollbackOutcome("ALREADY_RUNNING", registry.current().version(),
+                    "another refresh/rollback is in progress; current generation retained");
+        }
+        try {
+            GenerationRegistry reg = this.registry;
+            ThreatSnapshot current = reg.current();
+            if (generation == current.version()) {
+                return new RollbackOutcome("ALREADY_CURRENT", current.version(),
+                        "generation v" + generation + " is already the active one");
+            }
+            ThreatSnapshot target = null;
+            for (ThreatSnapshot past : reg.history()) {
+                if (past.version() == generation) {
+                    target = past;
+                    break;
+                }
+            }
+            if (target == null) {
+                String reason = generation <= reg.maxEvictedVersion() && generation > 0
+                        ? "GENERATION_EVICTED" : "GENERATION_NOT_FOUND";
+                log.warn("rollback to v{} rejected: {} (current=v{}, maxEvicted=v{})",
+                        generation, reason, current.version(), reg.maxEvictedVersion());
+                return new RollbackOutcome(reason, current.version(),
+                        "generation v" + generation + " is not available (" + reason
+                                + "); current v" + current.version() + " retained");
+            }
+            // 原子切换：目标代成为当前生效代，被替换的当前代重新进入历史（受容量约束）
+            List<ThreatSnapshot> hist = new ArrayList<>(reg.history());
+            hist.remove(target);
+            if (current.version() > 0L) {
+                hist.add(current);
+            }
+            long maxEvicted = evictOverflow(hist, reg.maxEvictedVersion());
+            this.registry = new GenerationRegistry(target, List.copyOf(hist), maxEvicted);
+            log.info("rolled back: active generation v{} -> v{} (history size={})",
+                    current.version(), target.version(), hist.size());
+            return new RollbackOutcome("ROLLED_BACK", target.version(),
+                    "active generation rolled back from v" + current.version()
+                            + " to v" + target.version());
+        } finally {
+            refreshLock.unlock();
+        }
+    }
+
+    /** 当前可见代际列表（当前生效代 + 保留的历史代，按版本升序）。 */
+    public List<ThreatSnapshot> generations() {
+        GenerationRegistry reg = this.registry;
+        List<ThreatSnapshot> all = new ArrayList<>(reg.history());
+        all.add(reg.current());
+        all.sort(Comparator.comparingLong(ThreatSnapshot::version));
+        return List.copyOf(all);
     }
 
     /**
@@ -328,7 +539,7 @@ public class ThreatIntelService {
      * 若指标来源于多个来源且其中任一受限，无权调用方整体被拒绝（不泄露部分明细）。
      */
     public List<Indicator> lookupIndicatorsByKey(String indicatorKey, Caller caller) {
-        ThreatSnapshot read = this.snapshot;
+        ThreatSnapshot read = registry.current();
         List<Indicator> found = read.indicators().stream()
                 .filter(i -> i.key().equals(indicatorKey))
                 .toList();
@@ -366,6 +577,13 @@ public class ThreatIntelService {
     private ThreatSnapshot buildSnapshot(long previousVersion, String contentHash,
                                          Map<String, Indicator> merged,
                                          List<SuppressionRule> suppressions) {
+        return buildSnapshot(previousVersion, contentHash, merged, suppressions, List.of());
+    }
+
+    private ThreatSnapshot buildSnapshot(long previousVersion, String contentHash,
+                                         Map<String, Indicator> merged,
+                                         List<SuppressionRule> suppressions,
+                                         List<com.github.xingjianluo.threatinteliocjava.model.SourceHealth> sourceHealth) {
         List<Indicator> indicators = merged.values().stream()
                 .sorted(Comparator.comparing(Indicator::key))
                 .toList();
@@ -376,7 +594,8 @@ public class ThreatIntelService {
             }
         }
         return new ThreatSnapshot(previousVersion + 1, System.currentTimeMillis(),
-                contentHash, indicators, suppressions, Map.copyOf(sourceCounts));
+                contentHash, indicators, suppressions, Map.copyOf(sourceCounts),
+                List.copyOf(sourceHealth));
     }
 
     private ImportReport zeroReport() {

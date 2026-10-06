@@ -135,6 +135,10 @@ class ConcurrentRefreshMatchTest {
         AtomicInteger hits = new AtomicInteger();
         AtomicInteger cleans = new AtomicInteger();
         ConcurrentLinkedQueue<String> badDecisions = new ConcurrentLinkedQueue<>();
+        // 刷新线程完成信号：查询线程持续查询直到刷新窗口结束，
+        // 保证查询负载确定地横跨"空快照 -> 完整快照"切换，而不是在首个刷新完成前就跑完
+        java.util.concurrent.atomic.AtomicBoolean refresherDone =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
 
         List<Future<?>> futures = new java.util.ArrayList<>();
         // 查询线程：对已知必然命中与必然不命中的两类值反复判定
@@ -145,7 +149,9 @@ class ConcurrentRefreshMatchTest {
             futures.add(pool.submit(() -> {
                 try {
                     start.await();
-                    for (int i = 0; i < 200; i++) {
+                    int i = 0;
+                    // 刷新窗口内持续查询；窗口结束后再跑一轮，确保覆盖到 v1 生效之后
+                    do {
                         Verdict v = service.match(null, hitInputs[(seed + i) % hitInputs.length], null);
                         if (!"HIT".equals(v.decision()) && !"CLEAN".equals(v.decision())
                                 && !"SUPPRESSED".equals(v.decision())) {
@@ -156,7 +162,8 @@ class ConcurrentRefreshMatchTest {
                         } else {
                             cleans.incrementAndGet();
                         }
-                    }
+                        i++;
+                    } while (!refresherDone.get() || i % 200 != 0);
                 } catch (Throwable e) {
                     errors.incrementAndGet();
                     badDecisions.add("EX: " + e);
@@ -173,6 +180,8 @@ class ConcurrentRefreshMatchTest {
             } catch (Throwable e) {
                 errors.incrementAndGet();
                 badDecisions.add("EX-REFRESH: " + e);
+            } finally {
+                refresherDone.set(true);
             }
         }));
         start.countDown();

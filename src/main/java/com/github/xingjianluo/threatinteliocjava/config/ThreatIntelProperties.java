@@ -29,6 +29,9 @@ public class ThreatIntelProperties {
     /** 刷新策略。 */
     private RefreshPolicy refreshPolicy = RefreshPolicy.FAIL_CLOSED;
 
+    /** 历史代际保留容量（默认最近 5 代；被淘汰的代际不可查询、不可回滚）。 */
+    private int historyCapacity = 5;
+
     public String getFeedDirectory() {
         return feedDirectory;
     }
@@ -67,5 +70,13 @@ public class ThreatIntelProperties {
 
     public void setRefreshPolicy(RefreshPolicy refreshPolicy) {
         this.refreshPolicy = refreshPolicy;
+    }
+
+    public int getHistoryCapacity() {
+        return historyCapacity;
+    }
+
+    public void setHistoryCapacity(int historyCapacity) {
+        this.historyCapacity = historyCapacity;
     }
 }
